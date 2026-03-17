@@ -21,11 +21,6 @@ from tkinter import ttk
 
 APP_NAME = "로그 분석 Tool"
 
-def app_dir():
-    if getattr(sys, "frozen", False):
-        return os.path.dirname(sys.executable)
-    return os.path.dirname(os.path.abspath(__file__))
-
 def get_version():
     version_file = os.path.join(app_dir(), "version.txt")
     try:
@@ -796,33 +791,6 @@ def write_excel(out_path: str,
 
         ws_chart.insert_chart(1, 14, pie_chart, {"x_scale": 1.2, "y_scale": 1.2})
 
-        # Error Bar Chart
-        if not top_all.empty:
-
-            chart_data = top_all
-            chart_data.to_excel(writer, sheet_name="그래프데이터", index=False)
-
-            rows = len(chart_data)
-
-            bar_chart = workbook.add_chart({"type": "column"})
-
-            bar_chart.add_series({
-                "name": "Error Count",
-                "categories": ["그래프데이터", 1, 1, rows, 1],
-                "values": ["그래프데이터", 1, 2, rows, 2],
-                "data_labels": {"value": True},
-            })
-
-            bar_chart.set_title({"name": "Error 별 발생 횟수"})
-            bar_chart.set_x_axis({
-                "name": "Error Name",
-                "num_font": {"rotation": -45}
-            })
-            bar_chart.set_y_axis({"name": "Count"})
-            bar_chart.set_legend({"none": True})
-
-            ws_chart.insert_chart(1, 0, bar_chart, {"x_scale": 1.2, "y_scale": 1.1})
-
         top5_pairs = list(
             zip(
                 top_all["error_code"].astype(str).head(5),
@@ -1036,24 +1004,24 @@ def write_excel(out_path: str,
 
             start_col += 18
 
-            if start_col > 9:
+            if start_col > 90:
                     start_col = 0
                     start_row += 18
 
-            # Charts 시트 앞으로 이동
-            worksheets = workbook.worksheets_objs
-            charts_sheet = None
+        # Charts 시트 앞으로 이동
+        worksheets = workbook.worksheets_objs
+        charts_sheet = None
 
-            for ws in worksheets:
-                if ws.name == "Charts":
-                    charts_sheet = ws
-                    break
+        for ws in worksheets:
+            if ws.name == "Charts":
+                charts_sheet = ws
+                break
 
-            if charts_sheet:
-                worksheets.remove(charts_sheet)
-                worksheets.insert(0, charts_sheet)
+        if charts_sheet:
+            worksheets.remove(charts_sheet)
+            worksheets.insert(0, charts_sheet)
 
-        else:
+        if chart_mode == "B":
             ws_chart.write(0, 0, "Mode B: PC별 차트 (각 차트에 Top5 코드 라인)")
             start_row = 2
             for pc in pcs:
@@ -1325,7 +1293,9 @@ class App(tk.Tk):
                 self.after(0, lambda: messagebox.showerror("오류", "급증 기준(이동평균 일수)는 1 이상의 정수여야 합니다."))
                 return
 
-            chart_mode = "A"
+            chart_mode = (prof.get("chart_mode") or "A").strip().upper()
+            if chart_mode not in ("A", "B"):
+                chart_mode = "A"
             handler_prefix = (self.var_handler_prefix.get() or "").strip()
             vision_prefix = (self.var_vision_prefix.get() or "").strip()
             vision_only_error = bool(self.var_vision_only_error.get())
