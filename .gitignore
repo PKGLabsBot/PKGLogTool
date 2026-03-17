@@ -1,0 +1,45 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# PyInstaller 빌드 결과물
+*.spec.bak
+build/
+dist/
+
+# 출력 파일 (분석 결과)
+output/
+*.xlsx
+
+# 디버그 로그
+debug_log.txt
+debug_samples.txt
+
+# 백업 파일
+*_backup.py
+*_backup.*
+
+# 로그 원본 (민감 데이터 제외)
+logs/
+
+# OS / IDE
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# 환경 설정
+.env
+*.env
+
+# 릴리즈 아카이브 (exe 포함)
+release/

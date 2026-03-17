@@ -1,0 +1,29 @@
+{
+  "display": "PINE2",
+  "handler_prefix": "Error_",
+  "vision_prefix": "Network_",
+  "vision_only_error": true,
+  "encoding": "utf-8",
+  "chart_mode": "A",
+  "top_n": 30,
+  "output_name": "{equip}_v{version}_{date}_log_report.xlsx",
+  "handler_parser": {
+    "dt_formats": [
+      "%Y-%m-%d %H:%M:%S:%f",
+      "%Y-%m-%d %H:%M:%S"
+    ],
+    "patterns": [
+      "^(?P<date>\\d{4}-\\d{2}-\\d{2})\\s+(?P<time>\\d{2}:\\d{2}:\\d{2}):(?P<ms>\\d{3})\\s+Error\\s*Code\\s*:\\s*(?P<code>\\d+)\\s*,\\s*Error\\s*Name\\s*:\\s*(?P<name>.*)$",
+      "Error\\s*Code\\s*:\\s*(?P<code>\\d+)\\s*,\\s*Error\\s*Name\\s*:\\s*(?P<name>.*)$"
+    ]
+  },
+  "vision_parser": {
+    "dt_formats": [
+      "%Y-%m-%d %H:%M:%S"
+    ],
+    "patterns": [
+      "^\\[(?P<dt>\\d{4}-\\d{2}-\\d{2}\\s+\\d{2}:\\d{2}:\\d{2})\\].*\\bError\\s+(?P<code>\\d+)\\s*(?P<name>.*)$",
+      "\\bError\\s+(?P<code>\\d+)\\s*(?P<name>.*)$"
+    ]
+  }
+}
