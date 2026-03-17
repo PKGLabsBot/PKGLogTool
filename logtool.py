@@ -21,6 +21,15 @@ from tkinter import ttk
 
 APP_NAME = "로그 분석 Tool"
 
+
+# ============================================================
+# 경로
+# ============================================================
+def app_dir() -> str:
+    if getattr(sys, "frozen", False):
+        return os.path.dirname(sys.executable)
+    return os.path.dirname(os.path.abspath(__file__))
+
 def get_version():
     version_file = os.path.join(app_dir(), "version.txt")
     try:
@@ -44,15 +53,6 @@ EQUIP_LIST = [
     "LMS",
     "ASIS",
 ]
-
-
-# ============================================================
-# 경로
-# ============================================================
-def app_dir() -> str:
-    if getattr(sys, "frozen", False):
-        return os.path.dirname(sys.executable)
-    return os.path.dirname(os.path.abspath(__file__))
 
 
 BASE_DIR = app_dir()
@@ -606,7 +606,7 @@ def build_dfs(all_infos: List[dict], all_counters: List[dict],
         columns=["pc_type", "error_code", "error_name", "event_count", "log_count"]
     )
     if not top_by_pc.empty:
-        top_by_pc = top_by_pc.sort_values(["pc_type", "count"], ascending=[True, False])
+        top_by_pc = top_by_pc.sort_values(["pc_type", "event_count"], ascending=[True, False])
         top_by_pc = top_by_pc.groupby("pc_type", as_index=False, group_keys=False).head(top_n)
 
     rows = [(day, pc, code, name, cnt) for (day, pc, code, name), cnt in cnt_day_code_pc.items()]
@@ -738,14 +738,14 @@ def write_excel(out_path: str,
                 "device": device,
                 "error_name": row["error_name"],
                 "event_count": row["event_count"],
-                "count": row["count"]
+                "log_count": row.get("log_count", 0),
             })
 
-        device_df = pd.DataFrame(device_rows, columns=["device", "error_name", "count"])
+        device_df = pd.DataFrame(device_rows, columns=["device", "error_name", "event_count", "log_count"])
 
         if not device_df.empty:
             device_df = device_df.sort_values(
-                ["device", "count"],
+                ["device", "event_count"],
                 ascending=[True, False]
             )
 
