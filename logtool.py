@@ -21,24 +21,18 @@ from tkinter import ttk
 
 APP_NAME = "로그 분석 Tool"
 
-# ============================================================
-# 경로
-# ============================================================
-def app_dir() -> str:
-    """실행 파일(frozen) 또는 스크립트 기준 디렉토리 반환."""
+def app_dir():
     if getattr(sys, "frozen", False):
         return os.path.dirname(sys.executable)
     return os.path.dirname(os.path.abspath(__file__))
 
-
-def get_version() -> str:
+def get_version():
     version_file = os.path.join(app_dir(), "version.txt")
     try:
         with open(version_file, "r", encoding="utf-8") as f:
             return f.read().strip()
     except Exception:
         return "1.0"
-
 
 APP_VERSION = get_version()
 
@@ -55,6 +49,15 @@ EQUIP_LIST = [
     "LMS",
     "ASIS",
 ]
+
+
+# ============================================================
+# 경로
+# ============================================================
+def app_dir() -> str:
+    if getattr(sys, "frozen", False):
+        return os.path.dirname(sys.executable)
+    return os.path.dirname(os.path.abspath(__file__))
 
 
 BASE_DIR = app_dir()
@@ -161,6 +164,7 @@ def default_profile_for(eq: str) -> Dict[str, Any]:
         "chart_mode": "A",
         "top_n": 30,
         "output_name": "{equip}_v{version}_{date}_log_report.xlsx",
+        "log_date_source": "log",
 
         # CYPRESS1 Handler 예시:
         # 2025-10-11 16:12:27:013    Error Code : 210, Error Name : PCB Reject Error
@@ -251,6 +255,7 @@ class RegexParser:
 
             if gd.get("dt"):
                 ts = parse_dt(gd.get("dt"), self.dt_formats)
+
             elif gd.get("date") and gd.get("time"):
                 date = (gd.get("date") or "").strip()
                 time = (gd.get("time") or "").strip()
@@ -264,10 +269,22 @@ class RegexParser:
 
                 ts = parse_dt(dt_value, self.dt_formats)
 
+            elif gd.get("time"):
+                time = (gd.get("time") or "").strip()
+                ms = (gd.get("ms") or "").strip()
+
+                if ms:
+                    micro = ms + "000"
+                    dt_value = f"{time}:{micro}"
+                else:
+                    dt_value = time
+
+                ts = parse_dt(dt_value, self.dt_formats)
+
             if not code:
                 return {"timestamp": ts, "error_code": None, "error_name": None}
 
-            if ts is None and ("dt" in gd or ("date" in gd and "time" in gd)):
+            if ts is None and ("dt" in gd or ("date" in gd and "time" in gd) or "time" in gd):
                 if self.parse_fail_count < self.max_fail_samples:
                     write_debug_sample(f"[{self.parser_name}] datetime parse failed | line={raw[:300]}")
                     self.parse_fail_count += 1
@@ -284,12 +301,10 @@ class RegexParser:
 # ============================================================
 # 파일 수집
 # ============================================================
-def iter_files(root_or_pattern: str, prefix: str) -> List[str]:
+def iter_files(root_or_pattern: str, prefix: str = "", contains: str = "") -> List[str]:
+
     if not root_or_pattern:
         return []
-
-    if any(ch in root_or_pattern for ch in ["*", "?", "["]):
-        return sorted(set([f for f in glob(root_or_pattern) if os.path.isfile(f)]))
 
     if os.path.isfile(root_or_pattern):
         return [root_or_pattern]
@@ -298,19 +313,29 @@ def iter_files(root_or_pattern: str, prefix: str) -> List[str]:
         raise FileNotFoundError(f"Input not found: {root_or_pattern}")
 
     out = []
-    prefix_l = (prefix or "").lower().strip()
+
+    prefix = (prefix or "").lower()
+
+    # contains 여러개 지원 (AjinError,Alarm 같은 형태)
+    contains_list = []
+    if contains:
+        contains_list = [x.strip().lower() for x in contains.split(",") if x.strip()]
 
     for root, _, files in os.walk(root_or_pattern):
+
         for fn in files:
+
             low = fn.lower()
 
-            # 확장자 검사
             if not (low.endswith(".txt") or low.endswith(".log")):
                 continue
 
-            # prefix가 있으면 "시작"이 아니라 "포함"으로 검사
-            if prefix_l and prefix_l not in low:
+            if prefix and not low.startswith(prefix):
                 continue
+
+            if contains_list:
+                if not any(c in low for c in contains_list):
+                    continue
 
             out.append(os.path.join(root, fn))
 
@@ -320,18 +345,28 @@ def iter_files(root_or_pattern: str, prefix: str) -> List[str]:
 # ============================================================
 # 집계
 # ============================================================
+# 중복 에러 처리 규칙:
+# 같은 pc_type + error_code가 ERROR_EVENT_GAP 초 이내 반복되면
+# Clear되지 않은 동일 이벤트로 간주하고 1회만 카운트한다.
 def aggregate_logs(files: List[str],
                    pc_type: str,
                    encoding: str,
                    only_error_lines: bool,
                    only_codes_set: Optional[set],
                    parser: RegexParser,
+                   log_date_source: str = "log",
                    progress_cb=None) -> Tuple[dict, dict]:
 
     cnt_code_by_pc = Counter()
+    # 로그 줄 기준 카운트 (중복 제거 전)
+    cnt_log_by_pc = Counter()
     cnt_day_code_pc = Counter()
     cnt_hour_code_pc = Counter()
     name_map = {}
+
+    # 같은 에러가 일정 시간 내 반복되면 1개 이벤트로 처리
+    last_error_time = {}
+    ERROR_EVENT_GAP = 120   # 초 단위, 필요하면 60 / 180 등으로 조정 가능
 
     total_lines_read = 0
     error_lines_counted = 0
@@ -341,6 +376,15 @@ def aggregate_logs(files: List[str],
     files_read_fail = 0
 
     total_files = len(files)
+
+    def extract_folder_date(file_path: str):
+        try:
+            folder_name = os.path.basename(os.path.dirname(file_path))
+            if folder_name.isdigit() and len(folder_name) == 8:
+                return datetime.strptime(folder_name, "%Y%m%d").date()
+        except Exception:
+            pass
+        return None
 
     for idx, fp in enumerate(files, start=1):
         if progress_cb:
@@ -357,7 +401,8 @@ def aggregate_logs(files: List[str],
 
                     total_lines_read += 1
 
-                    if "Error" not in line:
+                    # error / Error / ErrorCode 모두 허용
+                    if not any(x in line.lower() for x in ["error", "alarm"]):
                         continue
 
                     
@@ -367,13 +412,47 @@ def aggregate_logs(files: List[str],
                     name = (d.get("error_name") or "").strip()
                     ts = d.get("timestamp")
 
+                    if ts is not None and log_date_source == "folder" and ts.year == 1900:
+                        folder_date = extract_folder_date(fp)
+                        if folder_date is not None:
+                            ts = datetime.combine(folder_date, ts.time())
+
                     if only_error_lines and not code:
                         continue
                     if not code:
                         continue
 
                     code = str(code).strip()
+                    # 로그 기준 카운트 (중복 제거 전)
+                    cnt_log_by_pc[(pc_type, code, name)] += 1
                     if only_codes_set is not None and code not in only_codes_set:
+                        continue
+
+                    # ============================================================
+                    # 같은 에러 반복 기록을 1개의 이벤트로 묶기
+                    # 조건:
+                    # - 같은 pc_type
+                    # - 같은 error_code
+                    # - 이전 발생 후 ERROR_EVENT_GAP 초 이내 반복
+                    # ============================================================
+                    is_same_event = False
+
+                    if ts is not None:
+                        key = (pc_type, code)
+                        prev_ts = last_error_time.get(key)
+
+                        if prev_ts is not None:
+                            gap_sec = (ts - prev_ts).total_seconds()
+
+                            # 시간 역전이 아니고, 설정 시간 이내면 같은 이벤트로 봄
+                            if gap_sec >= 0 and gap_sec <= ERROR_EVENT_GAP:
+                                is_same_event = True
+
+                        # 현재 시각으로 마지막 발생 시각 갱신
+                        last_error_time[key] = ts
+
+                    # 같은 이벤트로 판단되면 카운트하지 않음
+                    if is_same_event:
                         continue
 
                     error_lines_counted += 1
@@ -411,6 +490,7 @@ def aggregate_logs(files: List[str],
 
     counters = {
         "cnt_code_by_pc": cnt_code_by_pc,
+        "cnt_day_code_pc": cnt_day_code_pc,
         "cnt_day_code_pc": cnt_day_code_pc,
         "cnt_hour_code_pc": cnt_hour_code_pc,
         "name_map": name_map,
@@ -494,12 +574,17 @@ def build_dfs(all_infos: List[dict], all_counters: List[dict],
 
     cnt_code_all = Counter()
     cnt_code_by_pc = Counter()
+    cnt_log_by_pc = Counter()
     cnt_day_code_pc = Counter()
     cnt_hour_code_pc = Counter()
     name_map = {}
 
     for c in all_counters:
         cnt_code_by_pc.update(c["cnt_code_by_pc"])
+
+        # 로그 카운트가 없는 경우도 처리
+        if "cnt_log_by_pc" in c:
+            cnt_log_by_pc.update(c["cnt_log_by_pc"])
         cnt_day_code_pc.update(c["cnt_day_code_pc"])
         cnt_hour_code_pc.update(c["cnt_hour_code_pc"])
         name_map.update(c["name_map"])
@@ -512,8 +597,19 @@ def build_dfs(all_infos: List[dict], all_counters: List[dict],
         columns=["error_code", "error_name", "count"]
     )
 
-    rows = [(pc, code, name, cnt) for (pc, code, name), cnt in cnt_code_by_pc.items()]
-    top_by_pc = pd.DataFrame(rows, columns=["pc_type", "error_code", "error_name", "count"])
+    rows = []
+
+    for (pc, code, name), event_cnt in cnt_code_by_pc.items():
+        log_cnt = cnt_log_by_pc.get((pc, code, name), 0)
+
+        rows.append(
+            (pc, code, name, event_cnt, log_cnt)
+        )
+
+    top_by_pc = pd.DataFrame(
+        rows,
+        columns=["pc_type", "error_code", "error_name", "event_count", "log_count"]
+    )
     if not top_by_pc.empty:
         top_by_pc = top_by_pc.sort_values(["pc_type", "count"], ascending=[True, False])
         top_by_pc = top_by_pc.groupby("pc_type", as_index=False, group_keys=False).head(top_n)
@@ -646,16 +742,19 @@ def write_excel(out_path: str,
             device_rows.append({
                 "device": device,
                 "error_name": row["error_name"],
+                "event_count": row["event_count"],
                 "count": row["count"]
             })
 
-        device_df = pd.DataFrame(device_rows)
+        device_df = pd.DataFrame(device_rows, columns=["device", "error_name", "count"])
 
-        # 장비별 실제 에러 목록 시트
-        device_df.sort_values(
-            ["device", "count"],
-            ascending=[True, False]
-        ).to_excel(
+        if not device_df.empty:
+            device_df = device_df.sort_values(
+                ["device", "count"],
+                ascending=[True, False]
+            )
+
+        device_df.to_excel(
             writer,
             sheet_name="Device_Error_List",
             index=False
@@ -664,11 +763,14 @@ def write_excel(out_path: str,
         # ============================================================
         # Device Error Summary (차트용)
         # ============================================================
-        device_summary = (
-            device_df.groupby("device")["count"]
-            .sum()
-            .reset_index()
-        )
+        if device_df.empty:
+            device_summary = pd.DataFrame(columns=["device", "count"])
+        else:
+            device_summary = (
+                device_df.groupby("device")[["event_count", "log_count"]]
+                .sum()
+                .reset_index()
+            )
 
         device_summary.to_excel(
             writer,
@@ -693,6 +795,33 @@ def write_excel(out_path: str,
         pie_chart.set_title({"name": "Device별 Error 비율"})
 
         ws_chart.insert_chart(1, 14, pie_chart, {"x_scale": 1.2, "y_scale": 1.2})
+
+        # Error Bar Chart
+        if not top_all.empty:
+
+            chart_data = top_all
+            chart_data.to_excel(writer, sheet_name="그래프데이터", index=False)
+
+            rows = len(chart_data)
+
+            bar_chart = workbook.add_chart({"type": "column"})
+
+            bar_chart.add_series({
+                "name": "Error Count",
+                "categories": ["그래프데이터", 1, 1, rows, 1],
+                "values": ["그래프데이터", 1, 2, rows, 2],
+                "data_labels": {"value": True},
+            })
+
+            bar_chart.set_title({"name": "Error 별 발생 횟수"})
+            bar_chart.set_x_axis({
+                "name": "Error Name",
+                "num_font": {"rotation": -45}
+            })
+            bar_chart.set_y_axis({"name": "Count"})
+            bar_chart.set_legend({"none": True})
+
+            ws_chart.insert_chart(1, 0, bar_chart, {"x_scale": 1.2, "y_scale": 1.1})
 
         top5_pairs = list(
             zip(
@@ -762,6 +891,9 @@ def write_excel(out_path: str,
 
         pc_pivot_sheets = {}
 
+        # PC별 pivot row 수 저장 (차트 생성 시 사용)
+        pc_rows_count = {}
+
         for pc in pcs:
 
             pc_data = by_day[by_day["pc_type"] == pc]
@@ -810,6 +942,8 @@ def write_excel(out_path: str,
             autosize_worksheet(writer.sheets[sheet_name], pc_pivot)
 
             pc_pivot_sheets[pc] = pc_pivot
+
+            pc_rows_count[pc] = len(pc_pivot)
 
         # ============================================================
         # Charts 생성
@@ -901,16 +1035,49 @@ def write_excel(out_path: str,
             ws_chart.insert_chart(start_row, start_col, chart, {"x_scale": 1.3, "y_scale": 0.9})
 
             start_col += 18
-            if start_col > 90:
-                start_col = 0
-                start_row += 18
 
-        # Charts 시트를 맨 앞으로 이동 (루프 완료 후 1회만 실행)
-        worksheets = workbook.worksheets_objs
-        charts_sheet = next((ws for ws in worksheets if ws.name == "Charts"), None)
-        if charts_sheet:
-            worksheets.remove(charts_sheet)
-            worksheets.insert(0, charts_sheet)
+            if start_col > 9:
+                    start_col = 0
+                    start_row += 18
+
+            # Charts 시트 앞으로 이동
+            worksheets = workbook.worksheets_objs
+            charts_sheet = None
+
+            for ws in worksheets:
+                if ws.name == "Charts":
+                    charts_sheet = ws
+                    break
+
+            if charts_sheet:
+                worksheets.remove(charts_sheet)
+                worksheets.insert(0, charts_sheet)
+
+        else:
+            ws_chart.write(0, 0, "Mode B: PC별 차트 (각 차트에 Top5 코드 라인)")
+            start_row = 2
+            for pc in pcs:
+                sheet = f"Pivot_{pc}"[:31]
+                if sheet not in writer.sheets or pc not in pc_rows_count or pc_rows_count[pc] <= 0:
+                    ws_chart.write(start_row, 0, f"{pc} 데이터 없음")
+                    start_row += 2
+                    continue
+
+                n = pc_rows_count[pc]
+                chart = workbook.add_chart({"type": "line"})
+                for j in range(2, len(pivot.columns)):
+                    chart.add_series({
+                        "name": [sheet, 0, j],
+                        "categories": [sheet, 1, 0, n, 0],
+                        "values": [sheet, 1, j, n, j],
+                    })
+
+                chart.set_title({"name": f"Daily counts - {pc} (Top5 codes)"})
+                chart.set_x_axis({"name": "Date"})
+                chart.set_y_axis({"name": "Count"})
+                chart.set_legend({"position": "bottom"})
+                ws_chart.insert_chart(start_row, 0, chart, {"x_scale": 1.6, "y_scale": 1.2})
+                start_row += 17
 
 
 # ============================================================
@@ -929,8 +1096,10 @@ class App(tk.Tk):
         self.var_equip = tk.StringVar(value=EQUIP_LIST[0])
 
         self.var_handler = tk.StringVar(value=LOGS_DIR)
-        self.var_vision = tk.StringVar(value=LOGS_DIR)
         self.var_output = tk.StringVar(value=os.path.join(OUTPUT_DIR, "log_report.xlsx"))
+
+        self.vision_paths = []
+        self.var_vision_display = tk.StringVar(value="")
 
         self.var_top = tk.StringVar(value="30")
         self.var_spike_factor = tk.StringVar(value="2.0")
@@ -939,7 +1108,6 @@ class App(tk.Tk):
         self.var_handler_prefix = tk.StringVar(value="Error_")
         self.var_vision_prefix = tk.StringVar(value="Network_")
         self.var_vision_only_error = tk.BooleanVar(value=True)
-        self.var_error_codes = tk.StringVar(value="")  # 쉼표 구분 에러코드 필터
 
         pad = 8
         nb = ttk.Notebook(self)
@@ -963,9 +1131,17 @@ class App(tk.Tk):
         tk.Entry(frm, textvariable=self.var_handler, width=84).grid(row=1, column=1, sticky="w", pady=(pad, 0))
         tk.Button(frm, text="폴더 선택", command=self.pick_handler).grid(row=1, column=2, padx=5, pady=(pad, 0))
 
-        tk.Label(frm, text="Vision 루트 폴더:").grid(row=2, column=0, sticky="w", pady=(pad, 0))
-        tk.Entry(frm, textvariable=self.var_vision, width=84).grid(row=2, column=1, sticky="w", pady=(pad, 0))
-        tk.Button(frm, text="폴더 선택", command=self.pick_vision).grid(row=2, column=2, padx=5, pady=(pad, 0))
+        tk.Label(frm, text="Vision 폴더들:").grid(row=2, column=0, sticky="nw", pady=(pad, 0))
+
+        tk.Entry(frm, textvariable=self.var_vision_display, width=84, state="readonly").grid(
+            row=2, column=1, sticky="w", pady=(pad, 0)
+        )
+
+        vision_btn_frame = tk.Frame(frm)
+        vision_btn_frame.grid(row=2, column=2, padx=5, pady=(pad, 0), sticky="nw")
+
+        tk.Button(vision_btn_frame, text="폴더 추가", command=self.pick_vision).pack(fill="x")
+        tk.Button(vision_btn_frame, text="전체 지움", command=self.clear_vision).pack(fill="x", pady=(4, 0))
 
         tk.Label(frm, text="출력 Excel(.xlsx):").grid(row=3, column=0, sticky="w", pady=(pad, 0))
         tk.Entry(frm, textvariable=self.var_output, width=84).grid(row=3, column=1, sticky="w", pady=(pad, 0))
@@ -973,10 +1149,6 @@ class App(tk.Tk):
 
         tk.Label(frm, text="Top N:").grid(row=4, column=1, sticky="w", padx=(220, 0), pady=(pad, 0))
         tk.Entry(frm, textvariable=self.var_top, width=6).grid(row=4, column=1, sticky="w", padx=(270, 0), pady=(pad, 0))
-
-        tk.Label(frm, text="Error Code 필터:").grid(row=5, column=0, sticky="w", pady=(pad, 0))
-        tk.Entry(frm, textvariable=self.var_error_codes, width=50).grid(row=5, column=1, sticky="w", pady=(pad, 0))
-        tk.Label(frm, text="(쉼표 구분, 비우면 전체)").grid(row=5, column=2, sticky="w", padx=5, pady=(pad, 0))
 
         tk.Label(frm, text="급증 배수:").grid(row=6, column=0, sticky="w", pady=(pad, 0))
         tk.Entry(frm, textvariable=self.var_spike_factor, width=8).grid(row=6, column=1, sticky="w", pady=(pad, 0))
@@ -1072,9 +1244,15 @@ class App(tk.Tk):
             self.var_handler.set(p)
 
     def pick_vision(self):
-        p = filedialog.askdirectory(title="Vision 루트 폴더 선택")
+        p = filedialog.askdirectory(title="Vision 폴더 선택")
         if p:
-            self.var_vision.set(p)
+            if p not in self.vision_paths:
+                self.vision_paths.append(p)
+            self.var_vision_display.set(" | ".join(self.vision_paths))
+
+    def clear_vision(self):
+        self.vision_paths = []
+        self.var_vision_display.set("")
 
     def pick_output(self):
         p = filedialog.asksaveasfilename(
@@ -1109,9 +1287,10 @@ class App(tk.Tk):
                 return
 
             handler_root = self.var_handler.get().strip()
-            vision_root = self.var_vision.get().strip()
-            if not handler_root and not vision_root:
-                self.after(0, lambda: messagebox.showerror("오류", "Handler 또는 Vision 루트 폴더를 최소 1개 이상 선택해 주세요."))
+            vision_roots = list(self.vision_paths)
+
+            if not handler_root and not vision_roots:
+                self.after(0, lambda: messagebox.showerror("오류", "Handler 또는 Vision 폴더를 최소 1개 이상 선택해 주세요."))
                 return
 
             encoding = "auto"
@@ -1128,12 +1307,7 @@ class App(tk.Tk):
                 self.after(0, lambda: messagebox.showerror("오류", "Top N은 1 이상의 정수여야 합니다."))
                 return
 
-            # Error Code 필터 파싱 (쉼표 구분, 빈 값이면 None = 전체 포함)
-            raw_codes = self.var_error_codes.get().strip()
-            if raw_codes:
-                only_codes_set = {c.strip() for c in raw_codes.split(",") if c.strip()}
-            else:
-                only_codes_set = None
+            only_codes_set = None
 
             try:
                 spike_factor = float(self.var_spike_factor.get().strip() or "2.0")
@@ -1151,20 +1325,17 @@ class App(tk.Tk):
                 self.after(0, lambda: messagebox.showerror("오류", "급증 기준(이동평균 일수)는 1 이상의 정수여야 합니다."))
                 return
 
-            # chart_mode: 프로파일에서 읽기 (기본값 "A")
-            chart_mode = (prof.get("chart_mode") or "A").strip().upper()
-            if chart_mode not in ("A", "B"):
-                chart_mode = "A"
-
+            chart_mode = "A"
             handler_prefix = (self.var_handler_prefix.get() or "").strip()
             vision_prefix = (self.var_vision_prefix.get() or "").strip()
             vision_only_error = bool(self.var_vision_only_error.get())
+            log_date_source = (prof.get("log_date_source") or "log").strip().lower()
 
             write_debug("===== ANALYSIS START =====")
             write_debug(f"app={APP_NAME} v{APP_VERSION}")
             write_debug(f"equipment={eq}")
             write_debug(f"handler_root={handler_root}")
-            write_debug(f"vision_root={vision_root}")
+            write_debug(f"vision_roots={vision_roots}")
             write_debug(f"encoding={encoding}")
             write_debug(f"output={out}")
 
@@ -1187,24 +1358,40 @@ class App(tk.Tk):
 
             total_file_count = 0
             handler_files = []
-            vision_files = []
+            vision_file_map = []
 
             if handler_root:
-                handler_files = iter_files(handler_root, prefix=handler_prefix)
+                handler_contains = prof.get("handler_contains", "")
 
-                # Prefix로 못 찾으면 전체 로그 다시 검색
+                handler_files = iter_files(
+                    handler_root,
+                    prefix=handler_prefix
+                )
+
+                if not handler_files and handler_contains:
+                    handler_files = iter_files(
+                        handler_root,
+                        contains=handler_contains
+                    )
+
                 if not handler_files:
-                    handler_files = iter_files(handler_root, prefix="")
+                    handler_files = iter_files(
+                        handler_root,
+                        prefix=""
+                    )
 
                 total_file_count += len(handler_files)
 
-            if vision_root:
-                vision_files = iter_files(vision_root, prefix=vision_prefix)
+            vision_file_map = {}
 
-                # Prefix로 못 찾으면 전체 로그 재검색 (Handler와 동일 fallback)
-                if not vision_files:
-                    vision_files = iter_files(vision_root, prefix="")
+            for vision_root in vision_roots:
+                pc_name = os.path.basename(vision_root).strip()
+                vision_files = iter_files(
+                    vision_root,
+                    prefix=vision_prefix
+                )
 
+                vision_file_map[pc_name] = vision_files
                 total_file_count += len(vision_files)
 
             processed_files = 0
@@ -1224,6 +1411,7 @@ class App(tk.Tk):
                     only_error_lines=True,
                     only_codes_set=only_codes_set,
                     parser=handler_parser,
+                    log_date_source=log_date_source,
                     progress_cb=progress_cb,
                 )
                 info_h["equipment"] = eq
@@ -1231,16 +1419,21 @@ class App(tk.Tk):
                 all_counters.append(counters_h)
                 processed_files += len(handler_files)
 
-            if vision_files:
+            for pc_name, vision_files in vision_file_map.items():
+                if not vision_files:
+                    continue
+
                 info_v, counters_v = aggregate_logs(
                     files=vision_files,
-                    pc_type="VISION",
+                    pc_type=f"VISION_{pc_name}",
                     encoding=encoding,
                     only_error_lines=vision_only_error,
                     only_codes_set=only_codes_set,
                     parser=vision_parser,
+                    log_date_source=log_date_source,
                     progress_cb=progress_cb,
                 )
+
                 info_v["equipment"] = eq
                 all_infos.append(info_v)
                 all_counters.append(counters_v)
