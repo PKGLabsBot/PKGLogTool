@@ -43,3 +43,22 @@ Thumbs.db
 
 # 릴리즈 아카이브 (exe 포함)
 release/
+
+# 설비별 로그 데이터 (원본 데이터, git 추적 제외)
+PINE2S#2/
+PINE2S#1/
+CYPRESS1/
+CYPRESS2/
+CYPRESS2+/
+MAPLE/
+PINE1/
+PINE2/
+JEDI/
+AVIS/
+LMS/
+ASIS/
+
+# 임시 실행 스크립트
+run_*_now.py
+check_result.py
+make_dirs.py
